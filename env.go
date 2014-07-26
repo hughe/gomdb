@@ -127,7 +127,7 @@ func (env *Env) Copy(path string) error {
 	return errno(ret)
 }
 
-func (env *Env) CopyFD(fd int) error {
+func (env *Env) CopyFD(fd uintptr) error {
 	cfd := C.mdb_filehandle_t(fd)
 	ret := C.mdb_env_copyfd(env._env, cfd)
 	return errno(ret)
