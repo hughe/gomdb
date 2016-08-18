@@ -5,7 +5,7 @@
  *	BerkeleyDB API, but much simplified.
  */
 /*
- * Copyright 2011-2015 Howard Chu, Symas Corp.
+ * Copyright 2011-2016 Howard Chu, Symas Corp.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -116,9 +116,7 @@ typedef SSIZE_T	ssize_t;
 #endif
 
 #if defined(__APPLE__) || defined (BSD)
-# if !(defined(MDB_USE_POSIX_MUTEX) || defined(MDB_USE_POSIX_SEM))
-# define MDB_USE_SYSV_SEM	1
-# endif
+# define MDB_USE_POSIX_SEM	1
 # define MDB_FDATASYNC		fsync
 #elif defined(ANDROID)
 # define MDB_FDATASYNC		fsync
@@ -129,22 +127,12 @@ typedef SSIZE_T	ssize_t;
 #ifdef MDB_USE_POSIX_SEM
 # define MDB_USE_HASH		1
 #include <semaphore.h>
-#elif defined(MDB_USE_SYSV_SEM)
-#include <sys/ipc.h>
-#include <sys/sem.h>
-#ifdef _SEM_SEMUN_UNDEFINED
-union semun {
-	int val;
-	struct semid_ds *buf;
-	unsigned short *array;
-};
-#endif /* _SEM_SEMUN_UNDEFINED */
 #else
 #define MDB_USE_POSIX_MUTEX	1
-#endif /* MDB_USE_POSIX_SEM */
-#endif /* !_WIN32 */
+#endif
+#endif
 
-#if defined(_WIN32) + defined(MDB_USE_POSIX_SEM) + defined(MDB_USE_SYSV_SEM) \
+#if defined(_WIN32) + defined(MDB_USE_POSIX_SEM) \
 	+ defined(MDB_USE_POSIX_MUTEX) != 1
 # error "Ambiguous shared-lock implementation"
 #endif
@@ -210,7 +198,7 @@ union semun {
 #define ESECT
 #endif
 
-#ifdef _MSC_VER
+#ifdef _WIN32
 #define CALL_CONV WINAPI
 #else
 #define CALL_CONV
@@ -246,8 +234,6 @@ union semun {
 #define	MDB_NO_ROOT		(MDB_LAST_ERRCODE + 10)
 #ifdef _WIN32
 #define MDB_OWNERDEAD	((int) WAIT_ABANDONED)
-#elif defined MDB_USE_SYSV_SEM
-#define MDB_OWNERDEAD	(MDB_LAST_ERRCODE + 11)
 #elif defined(MDB_USE_POSIX_MUTEX) && defined(EOWNERDEAD)
 #define MDB_OWNERDEAD	EOWNERDEAD	/**< #LOCK_MUTEX0() result if dead owner */
 #endif
@@ -270,8 +256,8 @@ union semun {
 #  define MDB_USE_ROBUST	0
 # else
 #  define MDB_USE_ROBUST	1
-/* glibc < 2.10 only provided _np API */
-#  if defined(__GLIBC__) && GLIBC_VER < 0x02000a
+/* glibc < 2.12 only provided _np API */
+#  if defined(__GLIBC__) && GLIBC_VER < 0x02000c
 #   define PTHREAD_MUTEX_ROBUST	PTHREAD_MUTEX_ROBUST_NP
 #   define pthread_mutexattr_setrobust(attr, flag)	pthread_mutexattr_setrobust_np(attr, flag)
 #   define pthread_mutex_consistent(mutex)	pthread_mutex_consistent_np(mutex)
@@ -343,46 +329,12 @@ mdb_sem_wait(sem_t *sem)
    return rc;
 }
 
-#elif defined MDB_USE_SYSV_SEM
-
-typedef struct mdb_mutex {
-	int semid;
-	int semnum;
-	int *locked;
-} mdb_mutex_t[1], *mdb_mutexref_t;
-
-#define LOCK_MUTEX0(mutex)		mdb_sem_wait(mutex)
-#define UNLOCK_MUTEX(mutex)		do { \
-	struct sembuf sb = { 0, 1, SEM_UNDO }; \
-	sb.sem_num = (mutex)->semnum; \
-	*(mutex)->locked = 0; \
-	semop((mutex)->semid, &sb, 1); \
-} while(0)
-
-static int
-mdb_sem_wait(mdb_mutexref_t sem)
-{
-	int rc, *locked = sem->locked;
-	struct sembuf sb = { 0, -1, SEM_UNDO };
-	sb.sem_num = sem->semnum;
-	do {
-		if (!semop(sem->semid, &sb, 1)) {
-			rc = *locked ? MDB_OWNERDEAD : MDB_SUCCESS;
-			*locked = 1;
-			break;
-		}
-	} while ((rc = errno) == EINTR);
-	return rc;
-}
-
-#define mdb_mutex_consistent(mutex)	0
-
 #else	/* MDB_USE_POSIX_MUTEX: */
 	/** Shared mutex/semaphore as it is stored (mdb_mutex_t), and as
 	 *	local variables keep it (mdb_mutexref_t).
 	 *
-	 *	An mdb_mutex_t can be assigned to an mdb_mutexref_t.  They can
-	 *	be the same, or an array[size 1] and a pointer.
+	 *	When #mdb_mutexref_t is a pointer declaration and #mdb_mutex_t is
+	 *	not, then it is array[size 1] so it can be assigned to a pointer.
 	 *	@{
 	 */
 typedef pthread_mutex_t mdb_mutex_t[1], *mdb_mutexref_t;
@@ -397,7 +349,7 @@ typedef pthread_mutex_t mdb_mutex_t[1], *mdb_mutexref_t;
 	/** Mark mutex-protected data as repaired, after death of previous owner.
 	 */
 #define mdb_mutex_consistent(mutex)	pthread_mutex_consistent(mutex)
-#endif	/* MDB_USE_POSIX_SEM || MDB_USE_SYSV_SEM */
+#endif	/* MDB_USE_POSIX_SEM */
 
 	/** Get the error code for the last failed system function.
 	 */
@@ -424,16 +376,8 @@ typedef pthread_mutex_t mdb_mutex_t[1], *mdb_mutexref_t;
 
 #if defined(_WIN32) || defined(MDB_USE_POSIX_SEM)
 #define MNAME_LEN	32
-#elif defined(MDB_USE_SYSV_SEM)
-#define MNAME_LEN	(sizeof(int))
 #else
 #define MNAME_LEN	(sizeof(pthread_mutex_t))
-#endif
-
-#ifdef MDB_USE_SYSV_SEM
-#define SYSV_SEM_FLAG	1		/**< SysV sems in lockfile format */
-#else
-#define SYSV_SEM_FLAG	0
 #endif
 
 /** @} */
@@ -577,7 +521,7 @@ static txnid_t mdb_debug_start;
 	/**	The version number for a database's datafile format. */
 #define MDB_DATA_VERSION	 ((MDB_DEVEL) ? 999 : 1)
 	/**	The version number for a database's lockfile format. */
-#define MDB_LOCK_VERSION	 ((MDB_DEVEL) ? 999 : 1)
+#define MDB_LOCK_VERSION	 1
 
 	/**	@brief The max size of a key we can write, or 0 for computed max.
 	 *
@@ -768,9 +712,6 @@ typedef struct MDB_txbody {
 	uint32_t	mtb_format;
 #if defined(_WIN32) || defined(MDB_USE_POSIX_SEM)
 	char	mtb_rmname[MNAME_LEN];
-#elif defined(MDB_USE_SYSV_SEM)
-	int 	mtb_semid;
-	int		mtb_rlocked;
 #else
 		/** Mutex protecting access to this table.
 		 *	This is the reader table lock used with LOCK_MUTEX().
@@ -799,19 +740,12 @@ typedef struct MDB_txninfo {
 #define mti_rmname	mt1.mtb.mtb_rmname
 #define mti_txnid	mt1.mtb.mtb_txnid
 #define mti_numreaders	mt1.mtb.mtb_numreaders
-#ifdef MDB_USE_SYSV_SEM
-#define	mti_semid	mt1.mtb.mtb_semid
-#define	mti_rlocked	mt1.mtb.mtb_rlocked
-#endif
 		char pad[(sizeof(MDB_txbody)+CACHELINE-1) & ~(CACHELINE-1)];
 	} mt1;
 	union {
 #if defined(_WIN32) || defined(MDB_USE_POSIX_SEM)
 		char mt2_wmname[MNAME_LEN];
 #define	mti_wmname	mt2.mt2_wmname
-#elif defined MDB_USE_SYSV_SEM
-		int mt2_wlocked;
-#define mti_wlocked	mt2.mt2_wlocked
 #else
 		mdb_mutex_t	mt2_wmutex;
 #define mti_wmutex	mt2.mt2_wmutex
@@ -826,7 +760,6 @@ typedef struct MDB_txninfo {
 	((uint32_t) \
 	 ((MDB_LOCK_VERSION) \
 	  /* Flags which describe functionality */ \
-	  + (SYSV_SEM_FLAG << 18) \
 	  + (((MDB_PIDLOCK) != 0) << 16)))
 /** @} */
 
@@ -1163,9 +1096,7 @@ struct MDB_txn {
  *	@{
  */
 	/** #mdb_txn_begin() flags */
-#define MDB_TXN_BEGIN_FLAGS	(MDB_NOMETASYNC|MDB_NOSYNC|MDB_RDONLY)
-#define MDB_TXN_NOMETASYNC	MDB_NOMETASYNC	/**< don't sync meta for this txn on commit */
-#define MDB_TXN_NOSYNC		MDB_NOSYNC	/**< don't sync this txn on commit */
+#define MDB_TXN_BEGIN_FLAGS	MDB_RDONLY
 #define MDB_TXN_RDONLY		MDB_RDONLY	/**< read-only transaction */
 	/* internal txn flags */
 #define MDB_TXN_WRITEMAP	MDB_WRITEMAP	/**< copy of #MDB_env flag in writers */
@@ -1340,7 +1271,7 @@ typedef struct MDB_ntxn {
 #endif
 
 	/** max bytes to write in one call */
-#define MAX_WRITE		(0x80000000U >> (sizeof(ssize_t) == 4))
+#define MAX_WRITE		(0x40000000U >> (sizeof(ssize_t) == 4))
 
 	/** Check \b txn and \b dbi arguments to a function */
 #define TXN_DBI_EXIST(txn, dbi, validity) \
@@ -3633,12 +3564,9 @@ mdb_txn_commit(MDB_txn *txn)
 	mdb_audit(txn);
 #endif
 
-	if ((rc = mdb_page_flush(txn, 0)))
-		goto fail;
-	if (!F_ISSET(txn->mt_flags, MDB_TXN_NOSYNC) &&
-		(rc = mdb_env_sync(env, 0)))
-		goto fail;
-	if ((rc = mdb_env_write_meta(txn)))
+	if ((rc = mdb_page_flush(txn, 0)) ||
+		(rc = mdb_env_sync(env, 0)) ||
+		(rc = mdb_env_write_meta(txn)))
 		goto fail;
 	end_mode = MDB_END_COMMITTED|MDB_END_UPDATE;
 
@@ -3763,6 +3691,7 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
 	p = calloc(NUM_METAS, psize);
 	if (!p)
 		return ENOMEM;
+
 	p->mp_pgno = 0;
 	p->mp_flags = P_META;
 	*(MDB_meta *)METADATA(p) = *meta;
@@ -3809,7 +3738,7 @@ mdb_env_write_meta(MDB_txn *txn)
 		toggle, txn->mt_dbs[MAIN_DBI].md_root));
 
 	env = txn->mt_env;
-	flags = txn->mt_flags | env->me_flags;
+	flags = env->me_flags;
 	mp = env->me_metas[toggle];
 	mapsize = env->me_metas[toggle ^ 1]->mm_mapsize;
 	/* Persist any increases of mapsize config */
@@ -3938,9 +3867,6 @@ mdb_env_create(MDB_env **env)
 #ifdef MDB_USE_POSIX_SEM
 	e->me_rmutex = SEM_FAILED;
 	e->me_wmutex = SEM_FAILED;
-#elif defined MDB_USE_SYSV_SEM
-	e->me_rmutex->semid = -1;
-	e->me_wmutex->semid = -1;
 #endif
 	e->me_pid = getpid();
 	GET_PAGESIZE(e->me_os_psize);
@@ -4539,16 +4465,14 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 #	define MDB_CLOEXEC		0
 #endif
 #endif
-#ifdef MDB_USE_SYSV_SEM
-	int semid;
-	union semun semu;
-#endif
 	int rc;
 	off_t size, rsize;
 
 #ifdef _WIN32
 	wchar_t *wlpath;
-	utf8_to_utf16(lpath, -1, &wlpath, NULL);
+	rc = utf8_to_utf16(lpath, -1, &wlpath, NULL);
+	if (rc)
+		return rc;
 	env->me_lfd = CreateFileW(wlpath, GENERIC_READ|GENERIC_WRITE,
 		FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_ALWAYS,
 		FILE_ATTRIBUTE_NORMAL, NULL);
@@ -4692,18 +4616,6 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 		env->me_wmutex = sem_open(env->me_txns->mti_wmname,
 			O_CREAT|O_EXCL, mode, 1);
 		if (env->me_wmutex == SEM_FAILED) goto fail_errno;
-#elif defined(MDB_USE_SYSV_SEM)
-		unsigned short vals[2] = {1, 1};
-		key_t key = ftok(lpath, 'M');
-		if (key == -1)
-			goto fail_errno;
-		semid = semget(key, 2, (mode & 0777) | IPC_CREAT);
-		if (semid < 0)
-			goto fail_errno;
-		semu.array = vals;
-		if (semctl(semid, 0, SETALL, semu) < 0)
-			goto fail_errno;
-		env->me_txns->mti_semid = semid;
 #else	/* MDB_USE_POSIX_MUTEX: */
 		pthread_mutexattr_t mattr;
 
@@ -4716,7 +4628,7 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 			|| (rc = pthread_mutex_init(env->me_txns->mti_wmutex, &mattr)))
 			goto fail;
 		pthread_mutexattr_destroy(&mattr);
-#endif	/* _WIN32 || ... */
+#endif	/* _WIN32 || MDB_USE_POSIX_SEM */
 
 		env->me_txns->mti_magic = MDB_MAGIC;
 		env->me_txns->mti_format = MDB_LOCK_FORMAT;
@@ -4724,9 +4636,6 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 		env->me_txns->mti_numreaders = 0;
 
 	} else {
-#ifdef MDB_USE_SYSV_SEM
-		struct semid_ds buf;
-#endif
 		if (env->me_txns->mti_magic != MDB_MAGIC) {
 			DPUTS("lock region has invalid magic");
 			rc = MDB_INVALID;
@@ -4752,26 +4661,8 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 		if (env->me_rmutex == SEM_FAILED) goto fail_errno;
 		env->me_wmutex = sem_open(env->me_txns->mti_wmname, 0);
 		if (env->me_wmutex == SEM_FAILED) goto fail_errno;
-#elif defined(MDB_USE_SYSV_SEM)
-		semid = env->me_txns->mti_semid;
-		semu.buf = &buf;
-		/* check for read access */
-		if (semctl(semid, 0, IPC_STAT, semu) < 0)
-			goto fail_errno;
-		/* check for write access */
-		if (semctl(semid, 0, IPC_SET, semu) < 0)
-			goto fail_errno;
 #endif
 	}
-#ifdef MDB_USE_SYSV_SEM
-	env->me_rmutex->semid = semid;
-	env->me_wmutex->semid = semid;
-	env->me_rmutex->semnum = 0;
-	env->me_wmutex->semnum = 1;
-	env->me_rmutex->locked = &env->me_txns->mti_rlocked;
-	env->me_wmutex->locked = &env->me_txns->mti_wlocked;
-#endif
-
 	return MDB_SUCCESS;
 
 fail_errno:
@@ -4869,7 +4760,9 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 		len = OPEN_ALWAYS;
 	}
 	mode = FILE_ATTRIBUTE_NORMAL;
-	utf8_to_utf16(dpath, -1, &wpath, NULL);
+	rc = utf8_to_utf16(dpath, -1, &wpath, NULL);
+	if (rc)
+		goto leave;
 	env->me_fd = CreateFileW(wpath, oflags, FILE_SHARE_READ|FILE_SHARE_WRITE,
 		NULL, len, mode, NULL);
 	free(wpath);
@@ -4901,7 +4794,9 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 			 */
 #ifdef _WIN32
 			len = OPEN_EXISTING;
-			utf8_to_utf16(dpath, -1, &wpath, NULL);
+			rc = utf8_to_utf16(dpath, -1, &wpath, NULL);
+			if (rc)
+				goto leave;
 			env->me_mfd = CreateFileW(wpath, oflags,
 				FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, len,
 				mode | FILE_FLAG_WRITE_THROUGH, NULL);
@@ -5028,16 +4923,6 @@ mdb_env_close0(MDB_env *env, int excl)
 				sem_unlink(env->me_txns->mti_rmname);
 				sem_unlink(env->me_txns->mti_wmname);
 			}
-		}
-#elif defined(MDB_USE_SYSV_SEM)
-		if (env->me_rmutex->semid != -1) {
-			/* If we have the filelock:  If we are the
-			 * only remaining user, clean up semaphores.
-			 */
-			if (excl == 0)
-				mdb_env_excl_lock(env, &excl);
-			if (excl > 0)
-				semctl(env->me_rmutex->semid, 0, IPC_RMID);
 		}
 #endif
 		munmap((void *)env->me_txns, (env->me_maxreaders-1)*sizeof(MDB_reader)+sizeof(MDB_txninfo));
@@ -5394,7 +5279,11 @@ mdb_page_search_root(MDB_cursor *mc, MDB_val *key, int flags)
 		indx_t		i;
 
 		DPRINTF(("branch page %"Z"u has %u keys", mp->mp_pgno, NUMKEYS(mp)));
-		mdb_cassert(mc, NUMKEYS(mp) > 1);
+		/* Don't assert on branch pages in the FreeDB. We can get here
+		 * while in the process of rebalancing a FreeDB branch page; we must
+		 * let that proceed. ITS#8336
+		 */
+		mdb_cassert(mc, !mc->mc_dbi || NUMKEYS(mp) > 1);
 		DPRINTF(("found index 0 to page %"Z"u", NODEPGNO(NODEPTR(mp, 0))));
 
 		if (flags & (MDB_PS_FIRST|MDB_PS_LAST)) {
@@ -5779,8 +5668,10 @@ mdb_cursor_next(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op)
 
 	DPRINTF(("cursor_next: top page is %"Z"u in cursor %p",
 		mdb_dbg_pgno(mp), (void *) mc));
-	if (mc->mc_flags & C_DEL)
+	if (mc->mc_flags & C_DEL) {
+		mc->mc_flags ^= C_DEL;
 		goto skip;
+	}
 
 	if (mc->mc_ki[mc->mc_top] + 1u >= NUMKEYS(mp)) {
 		DPUTS("=====> move to next sibling page");
@@ -5859,6 +5750,8 @@ mdb_cursor_prev(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op)
 	DPRINTF(("cursor_prev: top page is %"Z"u in cursor %p",
 		mdb_dbg_pgno(mp), (void *) mc));
 
+	mc->mc_flags &= ~(C_EOF|C_DEL);
+
 	if (mc->mc_ki[mc->mc_top] == 0)  {
 		DPUTS("=====> move to prev sibling page");
 		if ((rc = mdb_cursor_sibling(mc, 0)) != MDB_SUCCESS) {
@@ -5869,8 +5762,6 @@ mdb_cursor_prev(MDB_cursor *mc, MDB_val *key, MDB_val *data, MDB_cursor_op op)
 		DPRINTF(("prev page is %"Z"u, key index %u", mp->mp_pgno, mc->mc_ki[mc->mc_top]));
 	} else
 		mc->mc_ki[mc->mc_top]--;
-
-	mc->mc_flags &= ~C_EOF;
 
 	DPRINTF(("==> cursor points to page %"Z"u with %u keys, key index %u",
 	    mdb_dbg_pgno(mp), NUMKEYS(mp), mc->mc_ki[mc->mc_top]));
@@ -6602,7 +6493,7 @@ more:
 #endif
 				/* does data match? */
 				if (!dcmp(data, &olddata)) {
-					if (flags & MDB_NODUPDATA)
+					if (flags & (MDB_NODUPDATA|MDB_APPENDDUP))
 						return MDB_KEYEXIST;
 					/* overwrite it */
 					goto current;
@@ -9268,7 +9159,7 @@ mdb_env_copyfd0(MDB_env *env, HANDLE fd)
 	MDB_txn *txn = NULL;
 	mdb_mutexref_t wmutex = NULL;
 	int rc;
-	size_t wsize;
+	size_t wsize, w3;
 	char *ptr;
 #ifdef _WIN32
 	DWORD len, w2;
@@ -9327,15 +9218,15 @@ mdb_env_copyfd0(MDB_env *env, HANDLE fd)
 	if (rc)
 		goto leave;
 
-	w2 = txn->mt_next_pgno * env->me_psize;
+	w3 = txn->mt_next_pgno * env->me_psize;
 	{
 		size_t fsize = 0;
 		if ((rc = mdb_fsize(env->me_fd, &fsize)))
 			goto leave;
-		if (w2 > fsize)
-			w2 = fsize;
+		if (w3 > fsize)
+			w3 = fsize;
 	}
-	wsize = w2 - wsize;
+	wsize = w3 - wsize;
 	while (wsize > 0) {
 		if (wsize > MAX_WRITE)
 			w2 = MAX_WRITE;
@@ -9402,7 +9293,9 @@ mdb_env_copy2(MDB_env *env, const char *path, unsigned int flags)
 	 * already in the OS cache.
 	 */
 #ifdef _WIN32
-	utf8_to_utf16(lpath, -1, &wpath, NULL);
+	rc = utf8_to_utf16(lpath, -1, &wpath, NULL);
+	if (rc)
+		goto leave;
 	newfd = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_NEW,
 				FILE_FLAG_NO_BUFFERING|FILE_FLAG_WRITE_THROUGH, NULL);
 	free(wpath);
@@ -9597,6 +9490,7 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 	MDB_db dummy;
 	int rc, dbflag, exact;
 	unsigned int unused = 0, seq;
+	char *namedup;
 	size_t len;
 
 	if (flags & ~VALID_FLAGS)
@@ -9658,8 +9552,16 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 		MDB_node *node = NODEPTR(mc.mc_pg[mc.mc_top], mc.mc_ki[mc.mc_top]);
 		if ((node->mn_flags & (F_DUPDATA|F_SUBDATA)) != F_SUBDATA)
 			return MDB_INCOMPATIBLE;
-	} else if (rc == MDB_NOTFOUND && (flags & MDB_CREATE)) {
-		/* Create if requested */
+	} else if (! (rc == MDB_NOTFOUND && (flags & MDB_CREATE))) {
+		return rc;
+	}
+
+	/* Done here so we cannot fail after creating a new DB */
+	if ((namedup = strdup(name)) == NULL)
+		return ENOMEM;
+
+	if (rc) {
+		/* MDB_NOTFOUND and MDB_CREATE: Create new DB */
 		data.mv_size = sizeof(MDB_db);
 		data.mv_data = &dummy;
 		memset(&dummy, 0, sizeof(dummy));
@@ -9669,10 +9571,12 @@ int mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *db
 		dbflag |= DB_DIRTY;
 	}
 
-	/* OK, got info, add to table */
-	if (rc == MDB_SUCCESS) {
+	if (rc) {
+		free(namedup);
+	} else {
+		/* Got info, register DBI in this txn */
 		unsigned int slot = unused ? unused : txn->mt_numdbs;
-		txn->mt_dbxs[slot].md_name.mv_data = strdup(name);
+		txn->mt_dbxs[slot].md_name.mv_data = namedup;
 		txn->mt_dbxs[slot].md_name.mv_size = len;
 		txn->mt_dbxs[slot].md_rel = NULL;
 		txn->mt_dbflags[slot] = dbflag;
@@ -10123,6 +10027,8 @@ static int utf8_to_utf16(const char *src, int srcsize, wchar_t **dst, int *dstsi
 	if (need == 0)
 		return EINVAL;
 	result = malloc(sizeof(wchar_t) * need);
+	if (!result)
+		return ENOMEM;
 	MultiByteToWideChar(CP_UTF8, 0, src, srcsize, result, need);
 	if (dstsize)
 		*dstsize = need;
