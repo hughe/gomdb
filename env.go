@@ -31,6 +31,7 @@ const (
 	MAPASYNC   = C.MDB_MAPASYNC   // use asynchronous msync when MDB_WRITEMAP is use
 	NOTLS      = C.MDB_NOTLS      // tie reader locktable slots to Txn objects instead of threads
 	NORDAHEAD  = C.MDB_NORDAHEAD  // turn off readahead
+	CP_COMPACT = C.MDB_CP_COMPACT // Compacting copy: Omit free space from copy, and renumber all pages sequentially.
 )
 
 type DBI uint
@@ -134,6 +135,19 @@ func (env *Env) Copy(path string) error {
 func (env *Env) CopyFD(fd uintptr) error {
 	cfd := C.mdb_filehandle_t(fd)
 	ret := C.mdb_env_copyfd(env._env, cfd)
+	return errno(ret)
+}
+
+func (env *Env) Copy2(path string, flags uint) error {
+	cpath := C.CString(path)
+	defer C.free(unsafe.Pointer(cpath))
+	ret := C.mdb_env_copy2(env._env, cpath, C.uint(flags))
+	return errno(ret)
+}
+
+func (env *Env) CopyFD2(fd uintptr, flags uint) error {
+	cfd := C.mdb_filehandle_t(fd)
+	ret := C.mdb_env_copyfd2(env._env, cfd, C.uint(flags))
 	return errno(ret)
 }
 
