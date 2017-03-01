@@ -2276,6 +2276,8 @@ mdb_page_alloc(MDB_cursor *mc, int num, MDB_page **mp)
 	i = 0;
 	pgno = txn->mt_next_pgno;
 	if (pgno + num >= env->me_maxpg) {
+			fprintf(stderr, "\nMDB_MAP_FULL %s: %lu + %d (%lu) >= %lu\n\n",
+				env->me_path, pgno, num, pgno + num, env->me_maxpg);
 			DPUTS("DB size maxed out");
 			rc = MDB_MAP_FULL;
 			goto fail;
