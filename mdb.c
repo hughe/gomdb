@@ -4413,6 +4413,8 @@ mdb_env_open2(MDB_env *env)
 #endif
 	env->me_maxpg = env->me_mapsize / env->me_psize;
 
+	fprintf(stderr, "LMDB %s, me_mapsize: %lu, me_psize: %u, me_maxpg: %lu\n", env->me_path, env->me_mapsize, env->me_psize, env->me_maxpg);
+
 #if MDB_DEBUG
 	{
 		MDB_meta *meta = mdb_env_pick_meta(env);
