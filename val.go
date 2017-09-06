@@ -25,6 +25,10 @@ type Val C.MDB_val
 func Wrap(p []byte) *Val {
 	l := C.size_t(len(p))
 	ptr := C.malloc(C.sizeof_MDB_val + l)
+	// Clear the memory being allocated for the MDB_val struct, to avoid the Go 1.8 runtime
+	// sometimes panicing when val.mv_data is set below.
+	// Go 1.8 checks the old value of the pointer is valid when setting a pointer.
+	C.memset(ptr, 0, C.sizeof_MDB_val)
 	val := (*C.MDB_val)(ptr)
 	val.mv_size = l
 
