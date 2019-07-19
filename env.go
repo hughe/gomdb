@@ -246,3 +246,8 @@ func (env *Env) SetMaxDBs(size DBI) error {
 func (env *Env) DBIClose(dbi DBI) {
 	C.mdb_dbi_close(env._env, C.MDB_dbi(dbi))
 }
+
+func (env *Env) GetMaxKeySize() int {
+	ret := C.mdb_env_get_maxkeysize(env._env)
+	return int(ret)
+}
